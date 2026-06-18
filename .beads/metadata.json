@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "xpu_kllm",
+  "project_id": "df415682-9ab6-43f9-8bbc-9ef2eaa163e5"
+}
