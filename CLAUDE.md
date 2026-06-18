@@ -60,18 +60,40 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+# Kernel module (requires kernel headers)
+make -C kernel/
+
+# eBPF programs (requires clang 15+, libbpf)
+make -C bpf/
+
+# Userspace (requires SPDK)
+make -C userspace/
+
+# Tests
+make -C tests/ run
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Kernel-integrated LLM serving engine. The serving endpoint is `/dev/llm_prompt1`.
+
+```
+/dev/llm_prompt1 (chardev)
+  → eBPF BPE tokenizer (in-kernel, struct_ops)
+  → hugepage ring buffer (kernel↔userspace interface)
+  → SPDK reactor (polls ring, owns compute dispatch)
+    → SHORT: ACE BF16 paged attention (CPU, ≤threshold)
+    → LONG: GPU via rocm-xio NVMe-EP wavefronts to RADOS-NKV
+  KV cache: hugepage arena, content-addressed (SHA-256 of prefix)
+  P2P DMA: RNIC RDMA-WRITE → VRAM (no host bounce)
+```
+
+Split: kernel owns ingestion+tokenization, SPDK reactor owns ring consumption+KV+ACE attention, GPU owns long-context attention+decode via NVMe-EP.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- C11, kernel style for kernel/ and bpf/, SPDK style for userspace/
+- No runtime dynamic allocation — all memory from pre-registered hugepage arenas
+- Reference repos: ~/src/spdk, ~/src/linux, ~/src/llm-d, ~/src/vllm
+- See docs/BUILD_PLAN.md for full phased plan

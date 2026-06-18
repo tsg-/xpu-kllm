@@ -1,0 +1,2 @@
+obj-m := kllm.o
+kllm-y := llm_prompt.o
