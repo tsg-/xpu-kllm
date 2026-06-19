@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * Model weight loading via NVMe-EP wavefronts.
+ * Model weight loading via io_uring GPU Direct Storage.
  *
- * Loads per-layer weights from RADOS-NKV into VRAM or hugepage arena
+ * Loads per-layer weights from local NVMe into VRAM or hugepage arena
  * using the same wavefront mechanism as KV cache retrieval.
+ * Alternative source: RADOS-NKV objects (same key scheme, distributed).
  */
 
 #include <stdlib.h>

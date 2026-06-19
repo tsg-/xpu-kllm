@@ -52,7 +52,7 @@ enum kllm_dispatch_target kllm_dispatch_decide(struct kllm_dispatch_ctx *ctx,
 	 * Decision logic:
 	 * 1. If sequence is short AND cache hit → CPU (fast path)
 	 * 2. If sequence exceeds threshold → GPU (memory-bound on CPU)
-	 * 3. If cache miss → GPU (needs NVMe-EP fetch anyway)
+	 * 3. If cache miss → GPU (needs NVMe fetch anyway)
 	 * 4. If GPU is saturated AND seq is short → CPU (overflow)
 	 */
 	if (seq_len <= ctx->cfg.cpu_seq_threshold && cache_hit) {
@@ -60,7 +60,7 @@ enum kllm_dispatch_target kllm_dispatch_decide(struct kllm_dispatch_ctx *ctx,
 	} else if (seq_len > ctx->cfg.cpu_seq_threshold) {
 		target = KLLM_TARGET_GPU;
 	} else if (!cache_hit) {
-		/* Cache miss: GPU will fetch via NVMe-EP wavefront */
+		/* Cache miss: GPU will fetch via io_uring GDS wavefront */
 		target = KLLM_TARGET_GPU;
 	} else {
 		target = KLLM_TARGET_GPU;

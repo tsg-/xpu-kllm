@@ -5,16 +5,21 @@
 #include <stdint.h>
 
 /*
- * P2P DMA: RNIC RDMA-WRITE directly into GPU VRAM.
+ * P2P DMA: direct data path into GPU VRAM without host bounce.
  *
- * Path: RADOS-NKV → RNIC → PCIe P2P → GPU VRAM
- * No host bounce buffer. Data lands where compute will use it.
+ * Primary path: local NVMe → io_uring → dma-buf → PCIe P2P → GPU VRAM
+ * Alternative:  RNIC RDMA-WRITE into dma-buf exported VRAM (remote NVMe-oF)
  *
- * Implementation:
+ * Implementation (io_uring GDS):
  * 1. Export GPU VRAM region as dma-buf (via DRM or KFD)
- * 2. Import dma-buf into SPDK for NVMe DMA target registration
- * 3. RNIC gets the physical address of VRAM via MR registration
- * 4. RDMA-WRITE from storage node goes directly to VRAM
+ * 2. Register dma-buf fd with io_uring as fixed buffer
+ * 3. io_uring NVMe read SQEs target the dma-buf directly
+ * 4. NVMe controller P2P DMAs into VRAM via PCIe
+ *
+ * Implementation (RNIC RDMA, alternative):
+ * 1. Export GPU VRAM region as dma-buf
+ * 2. Register dma-buf with RNIC for MR (ibv_reg_dmabuf_mr)
+ * 3. Remote NVMe-oF target RDMA-WRITEs into VRAM
  *
  * For UMA (integrated GPU / shared memory): same API, but the
  * dma-buf points to system DRAM. No code change needed.
@@ -54,15 +59,15 @@ void kllm_p2p_free_region(struct kllm_p2p_ctx *ctx,
 			  struct kllm_p2p_region *region);
 
 /*
- * Register a P2P region with SPDK for use as NVMe DMA target.
+ * Register a P2P region with io_uring as a fixed buffer.
  * After this call, NVMe read completions can land directly in VRAM.
  */
 int kllm_p2p_register_spdk(struct kllm_p2p_ctx *ctx,
 			   struct kllm_p2p_region *region);
 
 /*
- * Register a P2P region with the RNIC for RDMA-WRITE target.
- * Returns the rkey for remote access.
+ * Register a P2P region's dma-buf fd with io_uring for fixed-buffer I/O.
+ * Returns the buffer index for use in io_uring SQEs.
  */
 int kllm_p2p_register_rdma(struct kllm_p2p_ctx *ctx,
 			   struct kllm_p2p_region *region,

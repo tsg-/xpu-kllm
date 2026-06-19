@@ -9,15 +9,18 @@
 #include "../gpu/gpu_attention.h"
 
 /*
- * Model weight loader via NVMe-EP wavefronts.
+ * Model weight loader via io_uring GPU Direct Storage.
  *
- * Loads model weights from NVMe storage directly into VRAM (for GPU)
- * or hugepage arena (for CPU) using NVMe-EP wavefronts — same
+ * Loads model weights from local NVMe directly into VRAM (for GPU)
+ * or hugepage arena (for CPU) using io_uring + dma-buf — same
  * mechanism as KV cache fetch, different content.
  *
- * Weights are stored as objects in RADOS-NKV:
+ * Weights are content-addressed:
  *   key = SHA-256("model_name:layer_N:component")
  *   value = BF16 tensor data
+ *
+ * Primary source: local NVMe (io_uring + dma-buf P2P)
+ * Alternative: RADOS-NKV pool objects (distributed, multi-node)
  *
  * Load order:
  * 1. Embedding table → VRAM/arena
@@ -26,7 +29,7 @@
  */
 
 struct kllm_weight_config {
-	const char *model_name;        /* RADOS object prefix */
+	const char *model_name;        /* content-address prefix for NVMe lookup */
 	uint32_t num_layers;
 	uint32_t hidden_dim;
 	uint32_t num_heads;
@@ -48,7 +51,7 @@ void kllm_weight_loader_destroy(struct kllm_weight_loader *loader);
 
 /*
  * Load all model weights. Blocks until complete.
- * Uses NVMe-EP wavefronts for parallel I/O (one wavefront per layer).
+ * Uses io_uring wavefronts for parallel I/O (one wavefront per layer).
  * Returns 0 on success.
  */
 int kllm_weight_loader_load_all(struct kllm_weight_loader *loader);

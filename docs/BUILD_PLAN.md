@@ -26,17 +26,18 @@ Two solved problems: hugepages kill the allocation problem (pre-allocated arena,
   │    │
   │    └─ LONG PATH (sequence > threshold or cache miss):
   │         - hand off to GPU
-  │         - GPU hashes token sequence (same content-addressing scheme)
-  │         - constructs wavefronts via rocm-xio NVMe-EP device
-  │         - pulls KV blocks from RADOS-NKV (content-addressed by seq hash)
-  │         - one doorbell ring per wavefront, zero GPU coordination
-  │         - weights load same way via NVMe-EP wavefronts
+  │         - reactor hashes token sequence (same content-addressing scheme)
+  │         - constructs io_uring wavefronts targeting local NVMe
+  │         - KV blocks fetched via dma-buf GPU Direct Storage
+  │         - one io_uring_submit() per wavefront batch
+  │         - weights load same way via io_uring GDS
   │
-  └─ P2P DMA for KV Retrieve:
-       - SPDK exports VRAM dma-buf
-       - RNIC RDMA-WRITEs directly into GPU memory
+  └─ GPU Direct Storage for KV Retrieve:
+       - GPU VRAM exported as dma-buf
+       - io_uring NVMe reads target dma-buf directly
+       - NVMe controller P2P DMAs into VRAM via PCIe
        - no host bounce buffer
-       - dGPU path: P2P DMA
+       - dGPU path: PCIe P2P DMA
        - UMA path: same code, shared DRAM
 
 Response: token stream back through chardev read()/poll()
@@ -47,7 +48,7 @@ Response: token stream back through chardev read()/poll()
 1. **No dynamic allocation in hot path** — all memory from hugepage arenas pre-registered at startup
 2. **No intermediate frameworks** — no io_uring bridge, no Wasm layer. Hugepage ring is the kernel↔SPDK interface.
 3. **Content-addressed KV cache** — same hash scheme on CPU and GPU, zero coordination
-4. **P2P everywhere** — RNIC→VRAM for KV, NVMe-EP→VRAM for weights, no host bounce
+4. **GPU Direct Storage** — io_uring + dma-buf for KV and weights, NVMe→VRAM with no host bounce (alt: RADOS-NKV, RNIC RDMA)
 5. **CPU attention is the fast path** — ACE makes short-prefix reconstruction competitive, GPU is the overflow path
 
 ## Epics
@@ -93,19 +94,22 @@ Paged attention on SPDK reactor using ACE intrinsics against hugepage KV blocks.
 | 3.5 | OCP MX block scaling: inline dequant during matmul, per-8-element scale factors | Yes |
 | 3.6 | Full short-path: token IDs → KV lookup → ACE attention → next-token logits | Needs 2.2+3.2+3.4 |
 
-### Epic 4: GPU Path + P2P DMA + NVMe-EP Wavefronts
+### Epic 4: GPU Path + io_uring GPU Direct Storage
 
-GPU attention for long sequences, KV cache via NVMe-EP from RADOS-NKV, P2P DMA.
+GPU attention for long sequences, KV cache fetched from local NVMe via io_uring + dma-buf.
+Alternative backends: RADOS-NKV (distributed), RNIC RDMA-WRITE (remote NVMe-oF), rocm-xio (GPU-initiated).
 
 | Task | What | Standalone? |
 |------|------|-------------|
-| 4.1 | rocm-xio NVMe-EP wavefront construction: batch KV block fetches by seq hash | Needs HW |
-| 4.2 | RADOS-NKV content-addressed store: object key = SHA-256(token prefix) | Yes (mock) |
-| 4.3 | dma-buf export from SPDK: expose VRAM region for RNIC RDMA-WRITE target | Needs GPU |
-| 4.4 | P2P DMA path: RNIC writes KV blocks directly into VRAM, no host bounce | Needs 4.3 |
-| 4.5 | GPU paged attention kernel (reference vLLM PagedAttention, adapted) | Needs GPU |
-| 4.6 | Weight loading via NVMe-EP wavefronts into VRAM at startup | Needs 4.1 |
+| 4.1 | io_uring wavefront construction: batch KV block fetches by seq hash | Yes |
+| 4.2 | Content-addressed NVMe store: LBA index by SHA-256(token prefix) | Yes (mock) |
+| 4.3 | dma-buf export: GPU VRAM region for io_uring fixed-buffer target | Needs GPU |
+| 4.4 | GPU Direct Storage path: NVMe → dma-buf → VRAM, no host bounce | Needs 4.3 |
+| 4.5 | GPU paged attention kernel (Intel Xe / CUDA / ROCm) | Needs GPU |
+| 4.6 | Weight loading via io_uring GDS into VRAM at startup | Needs 4.1 |
 | 4.7 | UMA fallback: same code path, shared DRAM instead of P2P | Yes |
+| 4.8 | RADOS-NKV backend: distributed KV fetch via NVMe-oF (multi-node) | Optional |
+| 4.9 | RNIC RDMA path: ibv_reg_dmabuf_mr + RDMA-WRITE into VRAM | Optional |
 
 ### Epic 5: Full Pipeline + Production
 
@@ -128,12 +132,12 @@ Epic 1 (chardev + tokenizer + ring)
     │        │
     │        ├──→ Epic 3 (ACE CPU attention)
     │        │        │
-    │        └──→ Epic 4 (GPU + P2P + NVMe-EP)
+    │        └──→ Epic 4 (GPU + io_uring GDS)
     │                 │
     └─────────────────┴──→ Epic 5 (full pipeline)
 ```
 
-Parallelizable: Epic 1 tasks, Epic 3 tasks 3.1-3.5, Epic 4 task 4.2 (RADOS mock).
+Parallelizable: Epic 1 tasks, Epic 3 tasks 3.1-3.5, Epic 4 task 4.2 (local NVMe mock).
 
 ## Vertical Slice (thinnest E2E proof)
 
@@ -157,22 +161,23 @@ Scope: single transformer layer, pre-loaded KV, CPU-only (no GPU path), single r
 
 | Need | For | Minimum | Fallback |
 |------|-----|---------|----------|
-| Linux kernel | chardev, eBPF, hugepage ring | 6.4+ (struct_ops, bpf_loop) | 6.1 (limited) |
-| SPDK | reactor, hugepage mempool, NVMe | 24.01 | 23.09 |
+| Linux kernel | chardev, eBPF, io_uring, hugepage ring | 6.4+ (struct_ops, bpf_loop, io_uring dma-buf) | 6.1 (limited) |
+| SPDK | reactor, hugepage mempool | 24.01 | 23.09 |
 | libbpf + clang | BPF compilation | 1.2+ / 15+ | — |
 | Intel GNR+ (ACE) | BF16 outer-product intrinsics | Granite Rapids | AMX BF16 on SPR |
-| AMD MI300+ | rocm-xio NVMe-EP | MI300X | Software NVMe-oF |
-| RADOS / Ceph | KV cache persistence | Pacific 16.2+ | Local NVMe + mock |
-| Mellanox CX-7+ | RDMA-WRITE to VRAM (P2P) | ConnectX-7 | Host-staged DMA |
-| ROCm | GPU attention kernels | ROCm 6.0+ | CUDA 12+ path |
+| Intel Xe GPU | SYCL paged attention | Data Center GPU Max (PVC) | CUDA or ROCm path |
+| Local NVMe | KV cache + weight storage | Any NVMe SSD | tmpfs mock |
+| NVMe with P2P | GPU Direct Storage (dma-buf target) | CMB or P2P-capable | Host-staged fallback |
+| RADOS / Ceph (opt) | Distributed KV persistence (multi-node) | Pacific 16.2+ | Local NVMe only |
+| RNIC (opt) | RDMA-WRITE into VRAM (remote NVMe-oF) | ConnectX-6+ | io_uring local path |
 
 ## Top Risks
 
 1. **BPF verifier rejects tokenizer** — instruction count / loop bounds. Mitigation: bpf_loop(), early exit, fallback to reactor-side tokenization.
-2. **P2P DMA RNIC→VRAM latency/bandwidth** — PCIe topology dependent, may not beat host-staged for small blocks. Mitigation: batch wavefronts, measure break-even block size.
+2. **PCIe P2P topology** — NVMe→GPU P2P requires same root complex or ACS bypass. Mitigation: detect topology at init, fall back to host-staged DMA.
 3. **ACE memory-bandwidth wall** — CPU attention is DRAM-bound beyond L3. Mitigation: strict sequence-length threshold, arena sized to L3 for hot prefixes.
-4. **NVMe-EP wavefront latency** — RADOS round-trip on cache miss. Mitigation: aggressive prefetch based on prefix prediction, size arena for working set.
-5. **rocm-xio maturity** — NVMe-EP device driver may not be production-ready. Mitigation: software NVMe-oF fallback (higher latency, same API).
+4. **io_uring dma-buf support maturity** — kernel support for dma-buf fixed buffers in io_uring is recent. Mitigation: host-staged read + explicit GPU copy as fallback.
+5. **NVMe read latency on cache miss** — random 4K reads add ~10us per block. Mitigation: aggressive prefetch, batch wavefronts, size arena for working set.
 
 ## Verification
 

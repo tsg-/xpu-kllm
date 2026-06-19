@@ -84,12 +84,12 @@ Kernel-integrated LLM serving engine. The serving endpoint is `/dev/llm_prompt1`
   → hugepage ring buffer (kernel↔userspace interface)
   → SPDK reactor (polls ring, owns compute dispatch)
     → SHORT: ACE BF16 paged attention (CPU, ≤threshold)
-    → LONG: GPU via rocm-xio NVMe-EP wavefronts to RADOS-NKV
+    → LONG: io_uring + dma-buf GPU Direct Storage (local NVMe → VRAM)
   KV cache: hugepage arena, content-addressed (SHA-256 of prefix)
-  P2P DMA: RNIC RDMA-WRITE → VRAM (no host bounce)
+  GPU Direct Storage: io_uring NVMe reads with dma-buf VRAM targets (no host bounce)
 ```
 
-Split: kernel owns ingestion+tokenization, SPDK reactor owns ring consumption+KV+ACE attention, GPU owns long-context attention+decode via NVMe-EP.
+Split: kernel owns ingestion+tokenization, SPDK reactor owns ring consumption+KV+ACE attention, GPU owns long-context attention+decode via io_uring GDS from local NVMe. Alternative storage: RADOS-NKV (distributed), RNIC RDMA-WRITE (remote), rocm-xio (GPU-initiated).
 
 ## Conventions & Patterns
 

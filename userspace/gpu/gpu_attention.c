@@ -21,11 +21,11 @@ static enum kllm_gpu_backend detect_gpu(void)
 {
 	void *handle;
 
-	/* Try ROCm first (AMD) */
-	handle = dlopen("libamdhip64.so", RTLD_LAZY);
+	/* Try Level Zero first (Intel Xe) */
+	handle = dlopen("libze_loader.so.1", RTLD_LAZY);
 	if (handle) {
 		dlclose(handle);
-		return KLLM_GPU_ROCM;
+		return KLLM_GPU_XE;
 	}
 
 	/* Try CUDA (NVIDIA) */
@@ -35,11 +35,11 @@ static enum kllm_gpu_backend detect_gpu(void)
 		return KLLM_GPU_CUDA;
 	}
 
-	/* Try Level Zero (Intel Xe) */
-	handle = dlopen("libze_loader.so.1", RTLD_LAZY);
+	/* Try ROCm (AMD) */
+	handle = dlopen("libamdhip64.so", RTLD_LAZY);
 	if (handle) {
 		dlclose(handle);
-		return KLLM_GPU_XE;
+		return KLLM_GPU_ROCM;
 	}
 
 	return KLLM_GPU_NONE;
@@ -55,9 +55,9 @@ struct kllm_gpu_ctx *kllm_gpu_create(void)
 
 	/*
 	 * TODO: create native stream/queue based on backend.
-	 * - ROCm:  hipStreamCreate(&stream)
-	 * - CUDA:  cudaStreamCreate(&stream)
 	 * - Xe:    new sycl::queue(...)
+	 * - CUDA:  cudaStreamCreate(&stream)
+	 * - ROCm:  hipStreamCreate(&stream)
 	 */
 
 	return ctx;
@@ -82,8 +82,8 @@ int kllm_gpu_paged_attention(struct kllm_gpu_ctx *ctx,
 	void *stream = p->stream ? p->stream : ctx->stream;
 
 	switch (ctx->backend) {
-	case KLLM_GPU_ROCM:
-		return kllm_gpu_paged_attention_rocm(
+	case KLLM_GPU_XE:
+		return kllm_gpu_paged_attention_xe(
 			p->output, p->query, p->block_tables, p->seq_lens,
 			p->num_seqs, p->num_heads, p->num_kv_heads,
 			p->head_dim, p->max_blocks_per_seq, p->scale, stream);
@@ -94,8 +94,8 @@ int kllm_gpu_paged_attention(struct kllm_gpu_ctx *ctx,
 			p->num_seqs, p->num_heads, p->num_kv_heads,
 			p->head_dim, p->max_blocks_per_seq, p->scale, stream);
 
-	case KLLM_GPU_XE:
-		return kllm_gpu_paged_attention_xe(
+	case KLLM_GPU_ROCM:
+		return kllm_gpu_paged_attention_rocm(
 			p->output, p->query, p->block_tables, p->seq_lens,
 			p->num_seqs, p->num_heads, p->num_kv_heads,
 			p->head_dim, p->max_blocks_per_seq, p->scale, stream);

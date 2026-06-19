@@ -59,7 +59,7 @@ struct kllm_block_hdr {
 } __attribute__((aligned(64)));
 
 #define KLLM_BLOCK_F_VALID	(1 << 0)
-#define KLLM_BLOCK_F_DIRTY	(1 << 1)  /* modified since last NVMe-EP write-back */
+#define KLLM_BLOCK_F_DIRTY	(1 << 1)  /* modified since last NVMe write-back */
 #define KLLM_BLOCK_F_PINNED	(1 << 2)  /* exempt from eviction */
 
 /*

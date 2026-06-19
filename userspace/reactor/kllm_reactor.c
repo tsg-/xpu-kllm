@@ -88,8 +88,8 @@ static int kllm_ring_poll(void *arg)
 		 * run kllm_ace_attention against cached K/V */
 		ctx->prompts_dispatched++;
 	} else {
-		/* Long path: hand off to GPU via NVMe-EP wavefronts */
-		/* TODO(Epic 4): construct wavefront, submit to rocm-xio */
+		/* Long path: hand off to GPU via io_uring GDS */
+		/* TODO: construct wavefront, submit io_uring SQEs */
 		ctx->prompts_dispatched++;
 	}
 

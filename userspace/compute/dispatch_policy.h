@@ -10,7 +10,7 @@
  *
  * Decision factors:
  * 1. Sequence length — short prefixes go CPU (ACE), long go GPU
- * 2. KV cache hit rate — hits stay on CPU, misses need NVMe-EP (GPU path)
+ * 2. KV cache hit rate — hits stay on CPU, misses trigger NVMe fetch (GPU path)
  * 3. Current GPU queue depth — if GPU is saturated, prefer CPU for short
  *
  * The threshold is empirically tunable: ACE on Xeon beats GPU round-trip
@@ -19,7 +19,7 @@
 
 enum kllm_dispatch_target {
 	KLLM_TARGET_CPU = 0,  /* ACE attention in SPDK reactor */
-	KLLM_TARGET_GPU = 1,  /* hand off to GPU via NVMe-EP wavefronts */
+	KLLM_TARGET_GPU = 1,  /* hand off to GPU via io_uring GDS */
 };
 
 struct kllm_dispatch_config {

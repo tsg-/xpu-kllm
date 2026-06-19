@@ -8,9 +8,9 @@
  * Unified GPU attention dispatch.
  *
  * Supports three backends:
- * - ROCm/HIP  (AMD MI300+)
- * - CUDA      (NVIDIA A100/H100+)
  * - Xe/SYCL   (Intel Data Center GPU Max / Battlemage)
+ * - CUDA      (NVIDIA A100/H100+)
+ * - ROCm/HIP  (AMD MI300+)
  *
  * The backend is selected at init time based on detected GPU hardware.
  * All backends expose the same C API; the kernel implementations differ.
@@ -18,9 +18,9 @@
 
 enum kllm_gpu_backend {
 	KLLM_GPU_NONE = 0,
-	KLLM_GPU_ROCM,
-	KLLM_GPU_CUDA,
 	KLLM_GPU_XE,
+	KLLM_GPU_CUDA,
+	KLLM_GPU_ROCM,
 };
 
 struct kllm_gpu_attention_params {

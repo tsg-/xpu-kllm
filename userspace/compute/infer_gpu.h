@@ -15,8 +15,8 @@
  * When the CPU path fails (cache miss or sequence too long), the
  * reactor escalates to GPU:
  *
- * 1. Build NVMe-EP wavefront for KV blocks needed
- * 2. Submit wavefront → data lands in VRAM via P2P DMA
+ * 1. Build io_uring wavefront for KV blocks needed
+ * 2. Submit SQEs → data lands in VRAM via dma-buf P2P DMA
  * 3. Run GPU paged attention kernel
  * 4. Copy logits back to host
  * 5. Return result in same format as CPU path
@@ -62,7 +62,7 @@ void kllm_infer_gpu_destroy(struct kllm_infer_gpu_ctx *ctx);
 /*
  * Run GPU inference for a token sequence.
  *
- * Fetches KV data via NVMe-EP wavefronts, runs paged attention on GPU,
+ * Fetches KV data via io_uring GDS wavefronts, runs paged attention on GPU,
  * copies logits back to host. Result format matches kllm_infer_result
  * for seamless interop with the decode loop.
  *

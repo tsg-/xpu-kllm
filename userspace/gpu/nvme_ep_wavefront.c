@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * NVMe-EP wavefront construction and submission.
+ * NVMe wavefront construction and submission.
  *
  * Builds batched NVMe read commands for KV cache blocks addressed
- * by SHA-256 of token prefix. Submitted to the rocm-xio NVMe-EP
- * device via SPDK NVMe driver.
+ * by SHA-256 of token prefix. Submitted via io_uring with dma-buf
+ * registered VRAM targets for GPU Direct Storage.
  *
- * In production: SPDK NVMe bdev → NVMe-oF/RDMA → RADOS-NKV gateway.
- * For development: mock with local NVMe or SPDK malloc bdev.
+ * Primary data path: local NVMe → io_uring → dma-buf → P2P DMA → GPU VRAM.
+ * Alternative: RADOS-NKV objects via SPDK NVMe-oF or rocm-xio.
+ * For development: mock with SPDK malloc bdev or /tmp ramdisk.
  */
 
 #include <stdlib.h>
@@ -32,9 +33,24 @@ struct kllm_wavefront_ctx *kllm_wavefront_create(const char *nvme_ep_dev)
 	ctx->next_seq_id = 1;
 
 	/*
-	 * TODO: open SPDK NVMe controller, allocate queue pair.
-	 * In production this is:
-	 *   spdk_nvme_probe() → spdk_nvme_ctrlr_alloc_io_qpair()
+	 * TODO: open NVMe device and set up io_uring with dma-buf registration.
+	 *
+	 * Production sequence:
+	 *   nvme_fd = open(nvme_dev, O_RDONLY | O_DIRECT)
+	 *   io_uring_queue_init(depth, &ring, IORING_SETUP_SQPOLL)
+	 *
+	 *   // Register dma-buf VRAM as fixed buffer:
+	 *   struct io_uring_regbuf_desc desc = {
+	 *       .type = IO_REGBUF_TYPE_DMABUF,
+	 *       .dmabuf_fd = vram_dma_buf_fd,
+	 *       .target_fd = nvme_fd,  // lazy: kernel defers attach until first I/O
+	 *   };
+	 *   io_uring_register_buffers_ext(&ring, &desc, 1)
+	 *
+	 *   // Acquire dma-token for fencing:
+	 *   token = io_dmabuf_token_get(desc.dmabuf_fd)
+	 *   // ~310ns software overhead per I/O vs ~20µs IOCTL path
+	 *
 	 * For now, just store the device path.
 	 */
 
@@ -56,17 +72,15 @@ int kllm_wavefront_submit(struct kllm_wavefront_ctx *ctx,
 		return -1;
 
 	/*
-	 * TODO: translate wavefront into SPDK NVMe read commands.
+	 * TODO: translate wavefront into io_uring NVMe read SQEs.
 	 *
 	 * For each block in the wavefront:
-	 * 1. Map obj_key to NVMe namespace LBA (via RADOS-NKV lookup)
-	 * 2. Set up scatter-gather with vram_dest_addr as DMA target
-	 * 3. Submit as single NVMe read command (or fused batch)
+	 * 1. Map obj_key → NVMe LBA (via content-address index)
+	 * 2. Prepare io_uring SQE with fixed buffer (dma-buf VRAM target)
+	 * 3. io_uring_prep_read_fixed(sqe, nvme_fd, vram_addr, size, lba, buf_idx)
 	 *
-	 * One doorbell ring covers the entire wavefront.
-	 * Completion notifies via SPDK callback → reactor event.
-	 *
-	 * spdk_nvme_ns_cmd_read() per block, with shared completion cb.
+	 * Single io_uring_submit() covers the entire wavefront batch.
+	 * Completion via io_uring CQE reap → reactor event.
 	 */
 
 	return 0;  /* placeholder: success */
@@ -76,8 +90,8 @@ int kllm_wavefront_poll(struct kllm_wavefront_ctx *ctx,
 			struct kllm_wf_completion *completions, int max_completions)
 {
 	/*
-	 * TODO: poll SPDK NVMe completion queue.
-	 * spdk_nvme_qpair_process_completions(qpair, max_completions)
+	 * TODO: reap io_uring CQEs.
+	 * io_uring_peek_batch_cqe(&ring, cqes, max_completions)
 	 */
 	(void)ctx;
 	(void)completions;
@@ -86,8 +100,8 @@ int kllm_wavefront_poll(struct kllm_wavefront_ctx *ctx,
 }
 
 /*
- * Content-addressing: hash the token sequence to derive the RADOS
- * object key(s) for the KV cache blocks covering this sequence.
+ * Content-addressing: hash the token sequence to derive the NVMe
+ * LBA key(s) for the KV cache blocks covering this sequence.
  *
  * Scheme: for a sequence of length N with tokens_per_block = B,
  * block i covers tokens [i*B, (i+1)*B).

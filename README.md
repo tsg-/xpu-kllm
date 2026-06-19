@@ -29,9 +29,9 @@ device — `echo "prompt" > /dev/llm_prompt1` replaces vLLM.
 │       │     ACE/AMX/AVX-512 BF16 paged attention        │
 │       │                                                 │
 │       └─► GPU path (long context or cache miss)         │
-│             NVMe-EP wavefront → RADOS-NKV               │
-│             P2P DMA (RNIC → VRAM, no host bounce)       │
-│             paged attention (ROCm / CUDA / Xe)          │
+│             io_uring + dma-buf GPU Direct Storage        │
+│             local NVMe → VRAM (no host bounce)          │
+│             paged attention (Intel Xe / CUDA / ROCm)    │
 │                                                         │
 │       ▼                                                 │
 │  decode loop (greedy / top-k / top-p / temperature)     │
@@ -45,11 +45,34 @@ device — `echo "prompt" > /dev/llm_prompt1` replaces vLLM.
 
 - **No vLLM, no Python** — kernel owns ingestion, SPDK reactor owns inference
 - **Zero dynamic allocation** — all memory from pre-registered hugepage arenas
+- **GPU Direct Storage** — io_uring + dma-buf for NVMe→VRAM without host bounce (also supports RADOS-NKV, RNIC RDMA)
 - **Content-addressed KV cache** — SHA-256(token prefix) → arena slot, same scheme on CPU and GPU
-- **Three GPU backends** — ROCm (MI300+), CUDA (A100/H100+), Intel Xe (PVC/BMG), detected at runtime via dlopen
+- **Three GPU backends** — Intel Xe (PVC/BMG), CUDA (A100/H100+), ROCm (MI300+), detected at runtime via dlopen
 - **Mid-sequence escalation** — starts on CPU, transparently moves to GPU on cache miss
 - **Continuous batching** — multiple concurrent writers, iteration-level scheduling
 - **OCP MX quantization** — FP8 E4M3 scale per 8-element micro-block for KV cache compression
+
+## Storage I/O path
+
+Primary: KV cache blocks and model weights live on local NVMe. On a cache
+miss or weight load, the reactor submits io_uring SQEs targeting dma-buf
+exported GPU VRAM regions — the NVMe controller DMAs directly into VRAM
+via P2P PCIe, bypassing host DRAM entirely.
+
+```
+cache miss → SHA-256(prefix) → LBA lookup
+  → io_uring_prep_read_fixed(nvme_fd, dmabuf_vram, ...)
+  → NVMe controller P2P DMA → GPU VRAM
+  → paged attention kernel launches on arrival
+```
+
+For UMA (integrated GPU / shared memory), the same code path works — the
+dma-buf simply points to system DRAM.
+
+Alternative storage backends (selectable at build time):
+- **RADOS-NKV** — distributed object store for multi-node KV persistence
+- **RNIC RDMA-WRITE** — remote NVMe-oF targets inject directly into VRAM
+- **rocm-xio** — AMD GPU-initiated I/O for ROCm deployments
 
 ## Directory layout
 
@@ -61,8 +84,8 @@ userspace/
   reactor/          SPDK app, ring consumer, batch scheduler, response path
   kvcache/          hugepage arena, content-addressed index, block format
   compute/          ACE attention, dispatch, CPU inference, GPU inference
-  gpu/              paged attention (HIP/CUDA/SYCL), NVMe-EP wavefronts, P2P DMA
-  weights/          model weight loader via NVMe-EP
+  gpu/              paged attention (SYCL/Xe, CUDA, HIP), io_uring GDS, P2P DMA
+  weights/          model weight loader (NVMe → VRAM direct)
   decode/           autoregressive decode loop + sampling
   tools/            kllm_trace (eBPF latency breakdown)
 tests/              E2E latency test, tokenizer benchmark, tokenizer validation
@@ -91,9 +114,9 @@ make -C tests/
 ```
 
 GPU backends build when their toolchain is detected:
-- ROCm: `hipcc` (gfx942)
-- CUDA: `nvcc` (sm_80)
 - Intel Xe: `icpx` with `-fsycl` (intel_gpu_pvc)
+- CUDA: `nvcc` (sm_80)
+- ROCm: `hipcc` (gfx942)
 
 ## Running
 
@@ -145,9 +168,8 @@ sudo ./userspace/tools/kllm_trace --summary
 | Component | Minimum | Optimal |
 |-----------|---------|---------|
 | CPU | AVX-512 BF16 (Cooper Lake+) | ACE BF16 (Granite Rapids+) |
-| GPU | Any ROCm/CUDA/Xe GPU | MI300X / H100 / PVC |
-| NIC | Any RDMA NIC | CX-7 for P2P DMA |
-| Storage | Local NVMe | NVMe-EP (B70) + RADOS-NKV |
+| GPU | Any Xe/CUDA/ROCm GPU | Intel PVC / H100 / MI300X |
+| Storage | Local NVMe (any), or RADOS-NKV | NVMe with CMB or P2P support |
 | Memory | 2MB hugepages | 1GB hugepages, 4+ GB arena |
 
 ## License

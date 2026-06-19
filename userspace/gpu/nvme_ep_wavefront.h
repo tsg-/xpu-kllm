@@ -5,20 +5,24 @@
 #include <stdint.h>
 
 /*
- * NVMe-EP wavefront construction for GPU-initiated KV cache fetch.
+ * NVMe wavefront construction for GPU Direct Storage.
  *
- * The GPU hashes token sequences using the same content-addressing
+ * The reactor hashes token sequences using the same content-addressing
  * scheme as the CPU cache, then constructs wavefronts — batched NVMe
- * read commands submitted via the rocm-xio NVMe-EP device.
+ * read commands submitted via io_uring with dma-buf registered VRAM targets.
  *
  * Each wavefront:
- * - Targets RADOS-NKV objects keyed by SHA-256(token prefix)
- * - One doorbell ring per wavefront (amortizes submission cost)
- * - Data lands directly in GPU VRAM via P2P DMA (dma-buf export)
+ * - Targets local NVMe blocks keyed by SHA-256(token prefix)
+ * - Batched io_uring submission (amortizes syscall cost)
+ * - Data lands directly in GPU VRAM via dma-buf P2P DMA
  *
  * This module runs on the SPDK reactor and prepares wavefronts
  * on behalf of the GPU. The GPU kernel triggers fetch via a
  * completion queue notification.
+ *
+ * Alternative backends (same wavefront interface):
+ * - RADOS-NKV: object keys map to RADOS pool objects (multi-node)
+ * - rocm-xio: GPU-initiated fetch via AMD ROCm I/O extensions
  */
 
 #define KLLM_WAVEFRONT_MAX_BLOCKS	64  /* max KV blocks per wavefront */
@@ -26,7 +30,7 @@
 
 /* Single block fetch descriptor within a wavefront */
 struct kllm_wf_block_desc {
-	uint8_t  obj_key[KLLM_SEQ_HASH_BYTES];  /* RADOS object key */
+	uint8_t  obj_key[KLLM_SEQ_HASH_BYTES];  /* content-address key (NVMe LBA index) */
 	uint64_t vram_dest_addr;                  /* GPU VRAM destination */
 	uint32_t block_size;                      /* bytes to transfer */
 	uint32_t layer_start;                     /* first layer in block */
@@ -59,7 +63,7 @@ struct kllm_wavefront_ctx;
 
 /*
  * Create wavefront context.
- * nvme_ep_dev: path to NVMe-EP device (e.g., /dev/nvme0n1 or SPDK bdev name)
+ * nvme_ep_dev: path to NVMe device (e.g., /dev/nvme0n1 or SPDK bdev name)
  */
 struct kllm_wavefront_ctx *kllm_wavefront_create(const char *nvme_ep_dev);
 void kllm_wavefront_destroy(struct kllm_wavefront_ctx *ctx);
@@ -78,7 +82,7 @@ int kllm_wavefront_poll(struct kllm_wavefront_ctx *ctx,
 /*
  * Construct a KV fetch wavefront from token sequence.
  * Hashes the sequence, looks up which blocks are needed,
- * fills the wavefront descriptor with RADOS object keys.
+ * fills the wavefront descriptor with content-address keys.
  */
 int kllm_wavefront_build_kv_fetch(struct kllm_wavefront *wf,
 				  const uint32_t *token_ids, uint32_t seq_len,

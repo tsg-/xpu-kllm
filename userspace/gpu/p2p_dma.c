@@ -1,13 +1,17 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * P2P DMA implementation: GPU VRAM ↔ RNIC for zero-copy KV fetch.
+ * P2P DMA implementation: GPU VRAM data path via dma-buf.
  *
- * Uses DRM (for dGPU dma-buf export) or KFD (for ROCm/AMD GPUs).
+ * Primary: local NVMe → io_uring → dma-buf → PCIe P2P → GPU VRAM
+ * Alternative: RNIC RDMA-WRITE into dma-buf exported VRAM (remote)
+ *
+ * Uses DRM (for dGPU dma-buf export) or KFD (for AMD GPUs).
  * Placeholder implementation — actual GPU interaction requires:
- * - ROCm: HSA/KFD APIs for VRAM allocation + dma-buf export
+ * - Intel Xe: Level Zero / DRM for VRAM allocation + dma-buf export
  * - NVIDIA: CUDA driver API + GDS for dma-buf
+ * - ROCm: HSA/KFD APIs for VRAM allocation + dma-buf export
  *
- * The UMA path is trivial: system malloc + ibv_reg_mr.
+ * The UMA path is trivial: hugepage mmap, same virtual address space.
  */
 
 #include <stdlib.h>
@@ -88,17 +92,21 @@ int kllm_p2p_alloc_region(struct kllm_p2p_ctx *ctx,
 	/*
 	 * dGPU path: allocate VRAM via DRM/KFD and export as dma-buf.
 	 *
+	 * Intel Xe (Level Zero):
+	 *   zeMemAllocDevice(..., &ptr)
+	 *   zeMemGetIpcHandle(...) or DRM_IOCTL_PRIME_HANDLE_TO_FD
+	 *
+	 * NVIDIA (CUDA):
+	 *   cuMemAlloc(&ptr, size) + cuMemExportToShareableHandle(dma_buf_fd)
+	 *
 	 * ROCm (AMD):
 	 *   hsaKmtAllocMemory(gpu_node, size, HSA_MEM_FLAGS_VRAM, &ptr)
 	 *   hsaKmtShareMemory(ptr, size, &dma_buf_fd)
 	 *
-	 * DRM generic:
-	 *   struct drm_mode_create_dumb → DRM_IOCTL_PRIME_HANDLE_TO_FD
-	 *
 	 * Placeholder: return error until GPU SDK is integrated.
 	 */
 
-	return -1;  /* TODO: implement with ROCm KFD or DRM */
+	return -1;  /* TODO: implement with Level Zero / CUDA / KFD */
 }
 
 void kllm_p2p_free_region(struct kllm_p2p_ctx *ctx,
@@ -119,14 +127,23 @@ int kllm_p2p_register_spdk(struct kllm_p2p_ctx *ctx,
 			   struct kllm_p2p_region *region)
 {
 	/*
-	 * Register the P2P region with SPDK's memory subsystem so that
-	 * NVMe completions can target this address directly.
+	 * Register the P2P region for io_uring fixed-buffer I/O.
 	 *
-	 * For UMA: spdk_mem_register(gpu_va, size)
-	 * For dGPU: spdk_mem_register_dma_buf(dma_buf_fd, size)
+	 * For UMA: io_uring_register_buffers(ring, &iov, 1)
+	 * For dGPU (io_uring + dma-buf, primary path):
+	 *   struct io_uring_regbuf_desc desc = {
+	 *       .type = IO_REGBUF_TYPE_DMABUF,
+	 *       .dmabuf_fd = region->dma_buf_fd,
+	 *       .target_fd = nvme_fd,  // lazy attach on first I/O
+	 *   };
+	 *   io_uring_register_buffers_ext(ring, &desc, 1)
 	 *
-	 * After registration, the physical/bus address is known to SPDK
-	 * and can be used in NVMe PRP/SGL entries.
+	 * Kernel uses ITER_DMABUF_MAP to iterate scatter-gather list from
+	 * the dma-buf attachment. dma-token (percpu_ref + RCU map) provides
+	 * fencing for concurrent I/O. IORING_OP_READ_FIXED then references
+	 * the registered buffer slot index.
+	 *
+	 * After registration, NVMe reads land directly in VRAM.
 	 */
 	(void)ctx;
 	(void)region;
@@ -138,13 +155,14 @@ int kllm_p2p_register_rdma(struct kllm_p2p_ctx *ctx,
 			   uint32_t *rkey_out)
 {
 	/*
-	 * Register region with RNIC for RDMA-WRITE access.
+	 * Register dma-buf with RNIC for RDMA access (alternative path).
 	 *
-	 * For UMA: ibv_reg_mr(pd, gpu_va, size, IBV_ACCESS_REMOTE_WRITE)
-	 * For dGPU: ibv_reg_dmabuf_mr(pd, dma_buf_fd, size, ...)
+	 * For RNIC/RDMA path:
+	 *   ibv_reg_dmabuf_mr(pd, region->dma_buf_fd, size, ...)
+	 *   Returns rkey for remote RDMA-WRITE into VRAM.
 	 *
-	 * The rkey is shared with the storage node so it can RDMA-WRITE
-	 * KV blocks directly into this region.
+	 * Primary path uses io_uring fixed buffers instead (see
+	 * kllm_p2p_register_spdk). Both share the dma-buf export.
 	 */
 	(void)ctx;
 	(void)region;
@@ -157,8 +175,8 @@ int kllm_p2p_check_topology(uint32_t gpu_id, const char *nic_pci_addr)
 {
 	/*
 	 * Check PCIe topology: is the GPU on the same root complex / switch
-	 * as the RNIC? If not, P2P goes through the CPU root complex
-	 * (still works but lower bandwidth).
+	 * as the NVMe device (or RNIC for RDMA path)? If not, P2P goes
+	 * through the CPU root complex (still works but lower bandwidth).
 	 *
 	 * Implementation: read /sys/bus/pci/devices/.../numa_node and
 	 * compare. Or use nvidia-smi topo / rocm-smi --showtopo.

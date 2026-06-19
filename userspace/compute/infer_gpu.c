@@ -6,8 +6,9 @@
  * 1. Direct GPU dispatch (long sequence, dispatch says GPU from start)
  * 2. Escalation from CPU (cache miss or threshold exceeded mid-decode)
  *
- * Both paths use NVMe-EP wavefronts to fetch KV data into VRAM,
- * then run GPU paged attention and copy logits back to host.
+ * Both paths use io_uring + dma-buf wavefronts to fetch KV data from
+ * local NVMe into VRAM, then run GPU paged attention and copy logits
+ * back to host.
  */
 
 #include <stdlib.h>
@@ -159,7 +160,7 @@ int kllm_infer_gpu(struct kllm_infer_gpu_ctx *ctx,
 	if (!ctx || !token_ids || seq_len == 0)
 		return -1;
 
-	/* Fetch KV data from NVMe-EP into VRAM */
+	/* Fetch KV data from local NVMe into VRAM via io_uring GDS */
 	if (fetch_kv_blocks(ctx, token_ids, seq_len) < 0)
 		return -1;
 
@@ -242,9 +243,9 @@ int kllm_infer_gpu_escalate(struct kllm_infer_gpu_ctx *ctx,
 	 * - The sequence grew past the CPU threshold, OR
 	 * - A cache miss occurred during decode
 	 *
-	 * Strategy: re-fetch full KV from NVMe-EP (the GPU will need
+	 * Strategy: re-fetch full KV from NVMe (the GPU will need
 	 * all blocks, not just the one the CPU missed). The CPU-computed
-	 * KV for earlier tokens is already stored back in RADOS by the
+	 * KV for earlier tokens is already persisted to NVMe by the
 	 * write-through cache, so the wavefront will retrieve it.
 	 *
 	 * Future optimization: copy CPU-resident KV directly to VRAM
