@@ -8,10 +8,10 @@ SPDK_CFLAGS := $(shell pkg-config --cflags spdk_event 2>/dev/null)
 SPDK_LDFLAGS := $(shell pkg-config --libs spdk_event spdk_env_dpdk 2>/dev/null)
 
 KVCACHE_SRCS := kvcache/arena_alloc.c kvcache/cache_index.c
-COMPUTE_SRCS := compute/ace_attention.c compute/dispatch_policy.c compute/infer_cpu.c
+COMPUTE_SRCS := compute/ace_attention.c compute/dispatch_policy.c compute/infer_cpu.c compute/infer_gpu.c
 WEIGHTS_SRCS := weights/weight_loader.c
 DECODE_SRCS  := decode/decode_loop.c
-REACTOR_SRCS := reactor/kllm_reactor.c reactor/kllm_response.c
+REACTOR_SRCS := reactor/kllm_reactor.c reactor/kllm_response.c reactor/batch_scheduler.c
 
 KVCACHE_OBJS := $(KVCACHE_SRCS:.c=.o)
 COMPUTE_OBJS := $(COMPUTE_SRCS:.c=.o)

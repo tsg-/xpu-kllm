@@ -9,7 +9,7 @@ ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)
 INCLUDES := -I. -I../kernel/chardev
 
-PROGS := tokenizer.bpf.o
+PROGS := tokenizer.bpf.o kllm_trace.bpf.o
 
 all: $(VMLINUX_H) $(PROGS)
 

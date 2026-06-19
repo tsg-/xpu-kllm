@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "../compute/infer_cpu.h"
+#include "../compute/infer_gpu.h"
 #include "../compute/dispatch_policy.h"
 #include "../reactor/kllm_response.h"
 
@@ -49,6 +50,7 @@ struct kllm_decode_stats {
 struct kllm_decode_ctx;
 
 struct kllm_decode_ctx *kllm_decode_create(struct kllm_infer_cpu_ctx *infer,
+					   struct kllm_infer_gpu_ctx *infer_gpu,
 					   struct kllm_dispatch_ctx *dispatch,
 					   struct kllm_response_ctx *response);
 void kllm_decode_destroy(struct kllm_decode_ctx *ctx);

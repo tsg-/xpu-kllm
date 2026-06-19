@@ -4,7 +4,7 @@ LDFLAGS := -lm -lcrypto
 
 LIBKLLM := ../userspace/libkllm.a
 
-TESTS := test_ebpf_tokenizer test_e2e_latency
+TESTS := test_ebpf_tokenizer test_e2e_latency bench_tokenizer
 
 all: $(TESTS)
 
@@ -13,6 +13,9 @@ test_ebpf_tokenizer: test_ebpf_tokenizer.c
 
 test_e2e_latency: test_e2e_latency.c $(LIBKLLM)
 	$(CC) $(CFLAGS) -o $@ $< -L../userspace -lkllm $(LDFLAGS)
+
+bench_tokenizer: bench_tokenizer.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 run: $(TESTS)
 	@for t in $(TESTS); do \

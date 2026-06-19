@@ -15,11 +15,13 @@
 #include <time.h>
 
 #include "decode_loop.h"
+#include "../compute/infer_gpu.h"
 
 #define MAX_SEQUENCE_LEN	32768
 
 struct kllm_decode_ctx {
 	struct kllm_infer_cpu_ctx *infer;
+	struct kllm_infer_gpu_ctx *infer_gpu;
 	struct kllm_dispatch_ctx  *dispatch;
 	struct kllm_response_ctx  *response;
 };
@@ -32,6 +34,7 @@ static inline uint64_t now_ns(void)
 }
 
 struct kllm_decode_ctx *kllm_decode_create(struct kllm_infer_cpu_ctx *infer,
+					   struct kllm_infer_gpu_ctx *infer_gpu,
 					   struct kllm_dispatch_ctx *dispatch,
 					   struct kllm_response_ctx *response)
 {
@@ -40,6 +43,7 @@ struct kllm_decode_ctx *kllm_decode_create(struct kllm_infer_cpu_ctx *infer,
 		return NULL;
 
 	ctx->infer = infer;
+	ctx->infer_gpu = infer_gpu;
 	ctx->dispatch = dispatch;
 	ctx->response = response;
 	return ctx;
@@ -219,15 +223,23 @@ int kllm_decode_run(struct kllm_decode_ctx *ctx,
 		int rc;
 		if (target == KLLM_TARGET_CPU) {
 			rc = kllm_infer_cpu(ctx->infer, sequence, seq_len, &result);
-			if (rc < 0) {
-				/* Cache miss: escalate to GPU */
-				/* TODO: invoke GPU path */
-				break;
+			if (rc < 0 && ctx->infer_gpu) {
+				/* Cache miss: escalate to GPU mid-sequence */
+				rc = kllm_infer_gpu_escalate(ctx->infer_gpu,
+							     ctx->infer,
+							     sequence, seq_len,
+							     &result);
 			}
+			if (rc < 0)
+				break;
 		} else {
-			/* GPU path */
-			/* TODO: submit wavefront, run GPU attention, get logits */
-			break;
+			/* GPU path (long sequence or GPU-first dispatch) */
+			if (!ctx->infer_gpu)
+				break;
+			rc = kllm_infer_gpu(ctx->infer_gpu, sequence, seq_len,
+					    &result);
+			if (rc < 0)
+				break;
 		}
 
 		/* Sample next token */
